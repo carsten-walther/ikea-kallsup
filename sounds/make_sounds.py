@@ -112,14 +112,12 @@ charging = sequence([
 ], total=1.1, decay=4.0, bright=0.45)
 finish(charging, "charging", 1.1)
 
-# Low battery: two gentle descending pairs, lower register, noticeable but calm
+# Low battery: one gentle descending pair, lower register, noticeable but calm
 low = sequence([
     ("E5", 0.00, 0.5, 0.85),
     ("A4", 0.16, 0.7, 0.9),
-    ("E5", 0.70, 0.5, 0.85),
-    ("A4", 0.86, 0.9, 0.9),
-], total=1.9, decay=4.5, bright=0.38)
-finish(low, "low_battery", 1.9)
+], total=1.1, decay=4.5, bright=0.38)
+finish(low, "low_battery", 1.1)
 
 # Full battery: bright rising four-note figure ending on a sustained major chord
 full = sequence([
@@ -149,11 +147,15 @@ def ping(freq, dur, decay=6.5):
     return sig
 
 
-# Wake word detected: a single short, bright ping (A5 = 880 Hz after TRANSPOSE).
-# Kept very short so it does not overlap with the user's spoken command.
-wake = np.zeros(int(SR * 0.9))
-place(wake, ping(note_freq("A6"), 0.9), 0.0)
-finish(wake, "wake_word", 0.9)
+# Wake word detected: a soft, short confirmation tone (E5 = 659 Hz after
+# TRANSPOSE). Uses the warm chime() rather than ping() - ping's fast attack
+# and high shimmer partials read as bright/metallic; a low bright value
+# here keeps it dull and unobtrusive. Kept a fourth above timer_finished's
+# pitch so the two stay distinguishable, and short so it does not overlap
+# with the user's spoken command.
+wake = np.zeros(int(SR * 0.6))
+place(wake, chime(note_freq("E6"), 0.6, decay=5.0, bright=0.15), 0.0)
+finish(wake, "wake_word", 0.6)
 
 # Timer finished: quick double-beep alarm ping. Loops via media_player.repeat_one
 # with a 500ms playlist delay while timer_ringing is on, giving a classic

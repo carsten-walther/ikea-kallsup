@@ -321,6 +321,12 @@ micro_wake_word:
       id: okay_nabu_model
     - model: hey_jarvis
       id: hey_jarvis_model
+    - model: "https://raw.githubusercontent.com/esphome/micro-wake-word-models/refs/heads/main/models/v2/experiments/okay_computer.json"
+      id: okay_computer_model
+    - model: "https://raw.githubusercontent.com/esphome/micro-wake-word-models/refs/heads/main/models/v2/experiments/hey_home_assistant.json"
+      id: hey_home_assistant_model
+    - model: "https://raw.githubusercontent.com/esphome/micro-wake-word-models/refs/heads/main/models/v2/experiments/hey_peppa_pig.json"
+      id: hey_peppa_pig_model
     - model: https://github.com/kahrendt/microWakeWord/releases/download/stop/stop.json
       id: stop
       internal: true
