@@ -857,8 +857,6 @@ binary_sensor:
       mode: INPUT_PULLUP
       inverted: true # Button connects to GND - confirmed on real hardware
     name: "Button BT"
-    on_press:
-      - media_player.mute: external_media_player
 
 #
 # https://esphome.io/components/button
