@@ -1,0 +1,925 @@
+# ═══════════════════════════════════════════════════════════
+#  Ikea Kallsup
+#  Mediaplayer | Home Assistant | Voice Assistant
+# ═══════════════════════════════════════════════════════════
+
+substitutions:
+  project_name: ikea-kallsup
+  author_name: carsten-walther
+  friendly_name: Ikea Kallsup
+  comment: Ikea Kallsup
+  version: 2026.9.29
+  area: ''
+
+  # How often the diagnostic sensors below poll and publish.
+  update_interval: 60s
+
+  # MAX98357A Audio Output
+  PIN_I2S_LRCLK: GPIO07     # lrclk/ws/fs - leftrightclock, word select, framesync
+  PIN_I2S_DOUT: GPIO08      # dout/sdata - data out to the DAC
+  PIN_I2S_BCLK: GPIO09      # bclk/sck - bit clock, serial clock
+
+  # Buttons on top of the device.
+  PIN_BUTTON_PLAY: GPIO04
+  PIN_BUTTON_BT: GPIO43
+
+  # INMP441 microphone - own I2S bus, separate from the MAX98357A's, to avoid
+  # crosstalk between mic input and speaker output. GPIO3 is avoided: it's an
+  # ESP32-S3 strapping pin (JTAG source selection at boot).
+  PIN_MIC_LRCLK: GPIO01
+  PIN_MIC_BCLK: GPIO02
+  PIN_MIC_DIN: GPIO05
+
+  # Status NeoPixel (WS2812) - replaces the onboard status_led. GPIO44 has no
+  # ADC, but a single WS2812 data line doesn't need one.
+  PIN_NEOPIXEL: GPIO44
+
+  # Battery voltage divider (2x 220kOhm from battery+ to GND, midpoint here).
+  # Not GPIO1 ("A0" on most XIAO battery guides): that pin is already the
+  # microphone's LRCLK on this board. GPIO6 is free and ADC1-capable.
+  PIN_BATTERY_ADC: GPIO06
+
+  # Tap on the onboard Charge LED's node (the leg towards the charging IC,
+  # not towards the 3.3V/GND rail) - the LED is driven directly by the
+  # charger's STAT output, not by any GPIO, so this is the only way to read
+  # charge state in software. Last free pin on this board: GPIO3, the
+  # ESP32-S3 JTAG-source strapping pin - only sampled during the reset
+  # pulse, so a steady tap here shouldn't affect boot, but hasn't been
+  # verified against this board's actual schematic (none is published).
+  PIN_CHARGE_STATUS: GPIO03
+
+  # Onboard user LED (Seeed XIAO ESP32S3) - not on the 11-pin header, so it
+  # doesn't compete with any of the taps above. Active-low: driving the pin
+  # high turns the LED off.
+  PIN_USER_LED: GPIO21
+
+#
+# https://esphome.io/components/esphome
+#
+esphome:
+  name: "${project_name}"
+  friendly_name: "${friendly_name}"
+  comment: "${comment}"
+  area: "${area}"
+
+  project:
+    name: "${author_name}.${project_name}"
+    version: "${version}"
+
+  on_boot:
+    # A restoring global is a component with setup_priority::HARDWARE;
+    # incrementing at the same priority races the load() that reads the
+    # stored value - the increment could land on the initial 0 and then be
+    # overwritten by the restore, so the count would never grow. 700 is
+    # safely after every HARDWARE component.
+    - priority: 700
+      then:
+        - lambda: |-
+            id(reset_count_id) += 1;
+
+    # Firmware Version, Reset Count and Reset Reason cannot change while the
+    # device is up - the version is compiled in, the counter was just
+    # incremented above, and esp_reset_reason() latches its answer at reset -
+    # so all three are pushed once here instead of polled. publish_state does
+    # not deduplicate, so polling them would resend an unchanged value over
+    # the api every update_interval for the lifetime of the device.
+    - priority: -100
+      then:
+        - wait_until: api.connected
+        - delay: 1s
+        - component.update: firmware_version_id
+        - component.update: reset_count_sensor_id
+        - component.update: reset_reason_id
+
+    # Plays once the Sendspin media player pipeline is up.
+    - priority: 220.0
+      then:
+        - media_player.play_media:
+            id: external_media_player
+            media_url: audio-file://startup_sound
+            announcement: true
+
+#
+# https://esphome.io/components/esp32
+#
+esp32:
+  board: seeed_xiao_esp32s3
+  flash_size: 8MB
+  cpu_frequency: 240MHZ
+  framework:
+    type: esp-idf
+    version: recommended
+    sdkconfig_options:
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB: "y"
+
+      # Moves instructions and read only data from flash into PSRAM on boot.
+      # Both enabled allows instructions to execute while a flash operation is
+      # in progress without needing to be placed in IRAM. Considerably speeds
+      # up things at the cost of using more PSRAM.
+      CONFIG_SPIRAM_RODATA: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
+
+      CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST: "y"
+      CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY: "y"
+
+      CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: "y"
+      CONFIG_MBEDTLS_SSL_PROTO_TLS1_3: "y"
+
+      CONFIG_SOC_WIFI_HE_SUPPORT: "y"
+      CONFIG_ESP_WIFI_11AX_SUPPORT: "y"
+
+#
+# https://esphome.io/components/psram
+#
+# Required for task_stack_in_psram below, and for the audio buffers
+# (media_source/speaker) to not run the device out of internal RAM.
+#
+psram:
+  mode: octal
+  speed: 80MHz
+  ignore_not_found: false
+
+#
+# https://esphome.io/components/api
+#
+api:
+  encryption:
+    key: !secret api_encryption_key
+  reboot_timeout: 0s # to avoid rebooting without HA
+
+#
+# https://esphome.io/components/wifi
+#
+wifi:
+  id: wifi_id
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  domain: .local
+  fast_connect: False
+  enable_btm: true  # 802.11v BSS Transition Management
+  enable_rrm: true  # 802.11k Radio Resource Management
+  power_save_mode: NONE
+  enable_on_boot: True
+  output_power: 18dB
+  ap:
+    ssid: "${project_name}"
+    password: !secret wifi_ap_password
+  on_disconnect:
+    then:
+      - lambda: |-
+          id(wifi_disconnects_since_boot_id)++;
+
+#
+# https://esphome.io/components/network
+#
+network:
+  enable_ipv6: true
+  enable_high_performance: true
+# The optimization level is PSRAM-aware:
+# - with PSRAM guaranteed:  (Psram configured with ignore_not_found: false): Aggressive settings with 512KB TCP windows and 512 WiFi RX buffers
+# - without PSRAM guaranteed:  Conservative optimized settings with 65KB TCP windows and 64 WiFi buffers
+# If you experience out-of-memory issues, you can disable these optimizations by setting enable_high_performance: false
+
+#
+# https://esphome.io/components/captive_portal
+#
+captive_portal:
+
+#
+# Only the classic push OTA from the dashboard: this node has no display to
+# show progress on, so the http_request pull path is not worth the flash.
+#
+ota:
+  #
+  # https://esphome.io/components/ota/esphome
+  #
+  - platform: esphome
+    password: !secret ota_password
+
+#
+# https://esphome.io/components/logger
+#
+logger:
+  level: DEBUG
+  logs:
+    sensor: WARN  # avoids logging debug sensor updates
+
+#
+# https://esphome.io/components/globals
+#
+globals:
+  - id: reset_count_id
+    type: int
+    restore_value: yes
+    initial_value: '0'
+
+  - id: wifi_disconnects_since_boot_id
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+#
+# https://esphome.io/components/i2s_audio
+#
+i2s_audio:
+  - id: i2s_audio_output
+    i2s_lrclk_pin:
+      number: ${PIN_I2S_LRCLK}
+      allow_other_uses: false
+    i2s_bclk_pin:
+      number: ${PIN_I2S_BCLK}
+      allow_other_uses: false
+
+  - id: i2s_audio_input
+    i2s_lrclk_pin:
+      number: ${PIN_MIC_LRCLK}
+      allow_other_uses: false
+    i2s_bclk_pin:
+      number: ${PIN_MIC_BCLK}
+      allow_other_uses: false
+
+#
+# https://esphome.io/components/speaker
+#
+speaker:
+  # Hardware speaker output, driving the MAX98357A.
+  - platform: i2s_audio
+    id: i2s_audio_speaker
+    i2s_audio_id: i2s_audio_output
+    i2s_mode: primary
+    i2s_dout_pin: ${PIN_I2S_DOUT}
+    sample_rate: 48000
+    bits_per_sample: 32bit
+    dac_type: external
+    channel: stereo
+    timeout: never
+    buffer_duration: 250ms
+
+  # Combines the announcement and media pipelines into one hardware output,
+  # so a sound effect/TTS response ducks the music instead of interrupting
+  # or fighting it for the I2S bus.
+  - platform: mixer
+    id: mixing_speaker
+    output_speaker: i2s_audio_speaker
+    num_channels: 2
+    task_stack_in_psram: true
+    source_speakers:
+      - id: announcement_mixing_input
+        timeout: never
+      - id: media_mixing_input
+        timeout: never
+
+  # The mixer requires both inputs at the same sample rate/bit depth as the
+  # hardware speaker; these normalize whatever each pipeline's source
+  # provides (e.g. Home Assistant's TTS, at its own native rate) into that.
+  - platform: resampler
+    id: announcement_resampling_speaker
+    output_speaker: announcement_mixing_input
+    sample_rate: 48000
+    bits_per_sample: 32
+
+  - platform: resampler
+    id: media_resampling_speaker
+    output_speaker: media_mixing_input
+    sample_rate: 48000
+    bits_per_sample: 32
+
+#
+# https://esphome.io/components/microphone
+#
+microphone:
+  - platform: i2s_audio
+    id: inmp441_mic
+    i2s_audio_id: i2s_audio_input
+    i2s_din_pin: ${PIN_MIC_DIN}
+    adc_type: external
+    channel: left
+    pdm: false
+    #sample_rate: 16000
+    bits_per_sample: 32bit
+    use_apll: true
+
+#
+# https://esphome.io/components/micro_wake_word
+#
+micro_wake_word:
+  id: wake_word_id
+  microphone:
+    microphone: inmp441_mic
+    channels: 0
+    gain_factor: 4
+  stop_after_detection: true
+  task_stack_in_psram: true
+  models:
+    - model: alexa
+      id: alexa_model
+    - model: okay_nabu
+      id: okay_nabu_model
+    - model: hey_jarvis
+      id: hey_jarvis_model
+    - model: https://github.com/kahrendt/microWakeWord/releases/download/stop/stop.json
+      id: stop
+      internal: true
+  vad:
+
+#
+# https://esphome.io/components/select
+#
+# Adjusts how easily the wake word triggers by raising/lowering each model's
+# probability_cutoff. Values and FAPH (False Accepts Per Hour, tested against
+# the Dinner Party Corpus) comments are taken from ESPHome's own Home
+# Assistant Voice PE reference config - they're only calibrated for
+# okay_nabu@20241226.3 and hey_jarvis@v2, so the alexa model is left at its
+# built-in default cutoff here rather than guessing a value for it.
+#
+select:
+  - platform: template
+    name: "Wake Word Sensitivity"
+    id: wake_word_sensitivity_id
+    icon: mdi:tune-variant
+    optimistic: true
+    initial_option: Slightly sensitive
+    restore_value: true
+    entity_category: config
+    options:
+      - Slightly sensitive
+      - Moderately sensitive
+      - Very sensitive
+    on_value:
+      lambda: |-
+        if (x == "Slightly sensitive") {
+          id(okay_nabu_model).set_probability_cutoff(217);   // 0.85 -> 0.000 FAPH on DipCo (Manifest's default)
+          id(hey_jarvis_model).set_probability_cutoff(247);  // 0.97 -> 0.563 FAPH on DipCo (Manifest's default)
+        } else if (x == "Moderately sensitive") {
+          id(okay_nabu_model).set_probability_cutoff(176);   // 0.69 -> 0.376 FAPH on DipCo
+          id(hey_jarvis_model).set_probability_cutoff(235);  // 0.92 -> 0.939 FAPH on DipCo
+        } else if (x == "Very sensitive") {
+          id(okay_nabu_model).set_probability_cutoff(143);   // 0.56 -> 0.751 FAPH on DipCo
+          id(hey_jarvis_model).set_probability_cutoff(212);  // 0.83 -> 1.502 FAPH on DipCo
+        }
+
+#
+# https://esphome.io/components/switch
+#
+switch:
+  # Gates wake_word_sound in voice_assistant: on_wake_word_detected below -
+  # lets the confirmation beep be turned off without touching the wake word
+  # detection itself.
+  - platform: template
+    id: wake_sound
+    name: "Wake Sound"
+    icon: "mdi:bullhorn"
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+#
+# https://esphome.io/components/voice_assistant
+#
+# Reuses the Sendspin speaker_source media_player as playback target - the
+# assistant's TTS response plays through the same speaker as music.
+#
+voice_assistant:
+  id: voice_assistant_id
+  microphone: inmp441_mic
+  micro_wake_word: wake_word_id
+  media_player: external_media_player
+  # False, not True: wake word detection already happened on-device via
+  # micro_wake_word - with this set to True, voice_assistant additionally
+  # asked Home Assistant to wait for a wake word inside the audio stream,
+  # which errored out with "no_wake_word" within milliseconds every time
+  # the pipeline was started this way, before any STT could happen.
+  use_wake_word: false
+  noise_suppression_level: 2
+  auto_gain: 31dBFS
+  volume_multiplier: 3.0
+  on_wake_word_detected:
+    - light.turn_on:
+        id: status_neopixel_id
+        red: 0%
+        green: 0%
+        blue: 100%
+    - light.turn_on: user_led_id
+    - if:
+        condition:
+          switch.is_on: wake_sound
+        then:
+          - media_player.play_media:
+              id: external_media_player
+              media_url: audio-file://wake_word_sound
+              announcement: true
+  # Ducks the music the instant listening starts, rather than waiting for
+  # media_player's own on_announcement (which only fires once the TTS
+  # response actually starts streaming back).
+  on_start:
+    - mixer_speaker.apply_ducking:
+        id: media_mixing_input
+        decibel_reduction: 20
+        duration: 0.0s
+  on_idle:
+    - script.execute: update_status_led
+  on_end:
+    - mixer_speaker.apply_ducking:
+        id: media_mixing_input
+        decibel_reduction: 0
+        duration: 1.0s
+    - script.execute: update_status_led
+
+#
+# https://esphome.io/components/http_request
+#
+http_request:
+  # Reduces CPU load when streaming audio.
+  buffer_size_rx: 2048
+
+#
+# https://esphome.io/components/sendspin
+#
+sendspin:
+  id: sendspin_hub
+  task_stack_in_psram: true
+
+#
+# https://esphome.io/components/media_source
+#
+media_source:
+  # Media pipeline: music, not announcements.
+  - platform: sendspin
+    id: sendspin_source
+    buffer_size: 500000
+
+  - platform: audio_http
+    id: http_source
+    buffer_size: 500000
+
+  # Announcement pipeline: sound effects and Home Assistant's TTS responses.
+  # A media_source can only feed one pipeline, so these are separate
+  # instances from sendspin_source/http_source above even though
+  # http_announcement_source and http_source are the same platform.
+  - platform: audio_file
+    id: audio_file_announcement_source
+
+  - platform: audio_http
+    id: http_announcement_source
+    buffer_size: 250000
+
+#
+# https://esphome.io/components/audio_file
+#
+audio_file:
+  - id: startup_sound
+    file: sounds/startup.mp3
+  
+  - id: charging_sound
+    file: sounds/charging.mp3
+  
+  - id: full_battery_sound
+    file: sounds/full_battery.mp3
+  
+  - id: low_battery_sound
+    file: sounds/low_battery.mp3
+  
+  - id: shutdown_sound
+    file: sounds/shutdown.mp3
+  
+  - id: wake_word_sound
+    file: sounds/wake_word.mp3
+
+#
+# https://esphome.io/components/media_player
+#
+media_player:
+  # Only necessary for controlling a Sendspin group. It does not play
+  # synchronized audio itself.
+  - platform: sendspin
+    id: sendspin_group_media_player
+
+  # Necessary for playing synchronized audio and controlling the Sendspin group.
+  - platform: speaker_source
+    id: external_media_player
+    name: "${friendly_name} Player"
+    announcement_pipeline:
+      format: FLAC
+      num_channels: 1
+      sample_rate: 48000
+      speaker: announcement_resampling_speaker
+      sources:
+        - audio_file_announcement_source
+        - http_announcement_source
+    media_pipeline:
+      format: FLAC
+      num_channels: 2
+      sample_rate: 48000
+      speaker: media_resampling_speaker
+      sources:
+        - sendspin_source
+        - http_source
+    # Ducks the music 20dB whenever any announcement (sound effect or TTS)
+    # plays, and restores it once nothing's announcing and the voice
+    # assistant isn't running.
+    on_announcement:
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 20
+          duration: 0.0s
+    on_state:
+      - if:
+          condition:
+            and:
+              - not:
+                  media_player.is_announcing: external_media_player
+              - not:
+                  voice_assistant.is_running:
+          then:
+            - mixer_speaker.apply_ducking:
+                id: media_mixing_input
+                decibel_reduction: 0
+                duration: 1.0s
+
+#
+# https://esphome.io/components/generic_image
+#
+# Only necessary for displaying cover art on a display - this device has none.
+# generic_image:
+#   - platform: sendspin
+#     id: sendspin_cover_art
+#     format: jpg
+#     type: rgb565
+#     resize: 200x200
+#     image_source: ALBUM
+
+#
+# https://esphome.io/components/debug
+#
+debug:
+  update_interval: 10s
+
+#
+# https://esphome.io/components/text_sensor
+#
+text_sensor:
+  - platform: template
+    id: reset_reason_id
+    name: Reset Reason
+    icon: mdi:restart-alert
+    entity_category: diagnostic
+    update_interval: never
+    lambda: |-
+      switch (esp_reset_reason()) {
+        case ESP_RST_POWERON:   return {"Power on"};
+        case ESP_RST_EXT:       return {"External reset"};
+        case ESP_RST_SW:        return {"Software reset"};
+        case ESP_RST_PANIC:     return {"Panic / exception"};
+        case ESP_RST_INT_WDT:   return {"Interrupt watchdog"};
+        case ESP_RST_TASK_WDT:  return {"Task watchdog"};
+        case ESP_RST_WDT:       return {"Other watchdog"};
+        case ESP_RST_DEEPSLEEP: return {"Deep sleep wake"};
+        case ESP_RST_BROWNOUT:  return {"Brownout"};
+        case ESP_RST_SDIO:      return {"SDIO reset"};
+        case ESP_RST_USB:       return {"USB peripheral"};
+        case ESP_RST_JTAG:      return {"JTAG"};
+        default:                return {"Unknown"};
+      }
+
+  - platform: version
+    name: ESPHome Version
+    icon: mdi:new-box
+
+  - platform: template
+    id: firmware_version_id
+    name: Firmware Version
+    icon: mdi:new-box
+    entity_category: diagnostic
+    update_interval: never
+    lambda: |-
+      return {"$version"};
+
+  - platform: wifi_info
+    ssid:
+      name: SSID
+      icon: mdi:wifi-star
+    bssid:
+      name: BSSID
+      icon: mdi:router-wireless
+    mac_address:
+      name: MAC Address
+      icon: mdi:network-outline
+    ip_address:
+      name: IP Address
+      icon: mdi:ip-network-outline
+    dns_address:
+      name: DNS Address
+      icon: mdi:dns-outline
+    power_save_mode:
+      name: WiFi Powersave Mode
+      icon: mdi:leaf
+
+  - platform: template
+    name: "Device Uptime"
+    entity_category: diagnostic
+    device_class: ""
+    update_interval: ${update_interval}
+    lambda: |-
+          int seconds = (id(uptime_seconds_id).state);
+          int days = seconds / (24 * 3600);
+
+          seconds = seconds % (24 * 3600);
+
+          int hours = seconds / 3600;
+          seconds = seconds % 3600;
+
+          int minutes = seconds /  60;
+          seconds = seconds % 60;
+
+          // an implausibly large uptime means the sensor has no reading yet
+          if (days > 3650) {
+            return {"Starting up"};
+          }
+
+          char buf[32];
+          if (days) {
+            snprintf(buf, sizeof(buf), "%dd %dh %dm %ds", days, hours, minutes, seconds);
+          } else if (hours) {
+            snprintf(buf, sizeof(buf), "%dh %dm %ds", hours, minutes, seconds);
+          } else if (minutes) {
+            snprintf(buf, sizeof(buf), "%dm %ds", minutes, seconds);
+          } else {
+            snprintf(buf, sizeof(buf), "%ds", seconds);
+          }
+          return {buf};
+    icon: mdi:clock-start
+
+  - platform: debug
+    device:
+      name: "Device Info"
+
+  # Stream metadata from the currently playing Sendspin source.
+  - platform: sendspin
+    type: title
+    id: sendspin_title
+    name: "Stream - Title"
+
+  - platform: sendspin
+    type: artist
+    id: sendspin_artist
+    name: "Stream - Artist"
+
+  - platform: sendspin
+    type: album
+    id: sendspin_album
+    name: "Stream - Album"
+
+#
+# https://esphome.io/components/binary_sensor
+#
+binary_sensor:
+  - platform: status
+    name: Connection Status
+    icon: mdi:connection
+
+  # Edge-triggered on purpose: on_press only fires on the false->true
+  # transition, so the sound plays once when the battery becomes low, not
+  # on every ${update_interval} voltage reading while it stays low.
+  - platform: template
+    id: battery_low_id
+    name: "Battery Low"
+    device_class: battery
+    entity_category: diagnostic
+    lambda: return id(battery_voltage_id).state < 3.4;
+    on_press:
+      - script.execute: update_status_led
+      - media_player.play_media:
+          id: external_media_player
+          media_url: audio-file://low_battery_sound
+          announcement: true
+    on_release:
+      - script.execute: update_status_led
+
+  # Taps the onboard Charge LED's node rather than a GPIO from the charging
+  # IC - see PIN_CHARGE_STATUS above. inverted: true assumes an active-low
+  # STAT output (common, but unverified against this board's schematic) -
+  # flip it if "Charging" reads backwards on the real hardware.
+  - platform: gpio
+    id: charging_id
+    name: "Charging"
+    device_class: battery_charging
+    entity_category: diagnostic
+    pin:
+      number: ${PIN_CHARGE_STATUS}
+      mode: INPUT_PULLUP
+      inverted: true
+    on_press:
+      - media_player.play_media:
+          id: external_media_player
+          media_url: audio-file://charging_sound
+          announcement: true
+    # Fires both when charging finishes (battery full) and when the charger
+    # is simply unplugged - the STAT tap can't tell those apart, there's no
+    # separate "USB present" signal.
+    on_release:
+      - media_player.play_media:
+          id: external_media_player
+          media_url: audio-file://full_battery_sound
+          announcement: true
+
+  # Buttons for controlling KALLSUP, still looking for a good use for the BT
+  # button.
+  - platform: gpio
+    id: button_play_id
+    pin:
+      number: ${PIN_BUTTON_PLAY}
+      mode: INPUT_PULLDOWN
+      inverted: false # Assume button connects to GND
+    name: "Button Play"
+    on_press:
+      - media_player.toggle: external_media_player
+
+  - platform: gpio
+    id: button_bt_id
+    pin:
+      number: ${PIN_BUTTON_BT}
+      mode: INPUT_PULLDOWN
+      inverted: false # Assume button connects to GND
+    name: "Button BT"
+    on_press:
+      - media_player.mute: external_media_player
+
+#
+# https://esphome.io/components/button
+#
+button:
+  - platform: restart
+    id: restart_id
+    name: Restart
+    icon: mdi:reload
+  
+  - platform: factory_reset
+    id: factoryreset_id
+    name: Factory Reset
+    icon: mdi:restart
+
+  - platform: safe_mode
+    id: safemode_id
+    name: Restart (Safe Mode)
+    icon: mdi:reload
+
+#
+# https://esphome.io/components/output
+#
+output:
+  - platform: gpio
+    id: user_led_output_id
+    pin:
+      number: ${PIN_USER_LED}
+      inverted: true # active-low
+
+#
+# https://esphome.io/components/light/esp32_rmt_led_strip
+# https://esphome.io/components/light/binary
+#
+# Status indicators: red when the battery is low, blue while a wake word is
+# being processed. See the "update_status_led" script for the idle/red logic
+# and the voice_assistant automations below for the blue overlay. The
+# onboard user LED mirrors the same events but can't show color, so it's
+# simply on whenever the NeoPixel isn't off.
+#
+light:
+  - platform: esp32_rmt_led_strip
+    id: status_neopixel_id
+    pin: ${PIN_NEOPIXEL}
+    chipset: ws2812
+    num_leds: 1
+    rgb_order: GRB
+    name: "Status LED"
+    entity_category: config
+    restore_mode: ALWAYS_OFF
+
+  - platform: binary
+    id: user_led_id
+    name: "User LED"
+    output: user_led_output_id
+    entity_category: diagnostic
+    restore_mode: ALWAYS_OFF
+
+#
+# https://esphome.io/components/script
+#
+# Re-evaluates what the status LED should show outside of an active wake
+# word (red if the battery is low, off otherwise). Called from
+# battery_low_id's on_press/on_release, and again once voice_assistant falls
+# back to idle so the blue "listening" overlay doesn't get stuck on.
+#
+script:
+  - id: update_status_led
+    then:
+      - if:
+          condition:
+            binary_sensor.is_on: battery_low_id
+          then:
+            - light.turn_on:
+                id: status_neopixel_id
+                red: 100%
+                green: 0%
+                blue: 0%
+            - light.turn_on: user_led_id
+          else:
+            - light.turn_off: status_neopixel_id
+            - light.turn_off: user_led_id
+
+#
+# https://esphome.io/components/sensor
+#
+sensor:
+  # 2x 220kOhm divider from battery+ to GND, midpoint on PIN_BATTERY_ADC -
+  # halves the battery voltage into the ADC's range, multiply: 2.0 below
+  # undoes that. attenuation: 12db is needed to read the full 0-3.3V range.
+  - platform: adc
+    id: battery_voltage_id
+    pin: ${PIN_BATTERY_ADC}
+    name: "Battery Voltage"
+    unit_of_measurement: "V"
+    device_class: voltage
+    entity_category: diagnostic
+    accuracy_decimals: 2
+    update_interval: ${update_interval}
+    attenuation: 12db
+    filters:
+      - multiply: 2.0
+
+  - platform: uptime
+    id: uptime_seconds_id
+    name: Uptime
+    icon: mdi:timer-outline
+    type: seconds
+    internal: True
+    entity_category: diagnostic
+    device_class: ""
+
+  - platform: template
+    id: reset_count_sensor_id
+    name: Reset Count
+    icon: mdi:restart-alert
+    state_class: total_increasing
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: never
+    lambda: |-
+      return id(reset_count_id);
+
+  - platform: wifi_signal
+    id: wifi_signal_db
+    name: WiFi Signal (dBm)
+    icon: mdi:wifi
+    entity_category: diagnostic
+    device_class: ""
+    unit_of_measurement: "dBm"
+    update_interval: ${update_interval}
+
+  - platform: copy
+    id: wifi_signal_percent
+    name: WiFi Signal (%)
+    icon: mdi:wifi
+    source_id: wifi_signal_db
+    unit_of_measurement: "%"
+    entity_category: diagnostic
+    device_class: ""
+    filters:
+      - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
+
+  - platform: debug
+    psram:
+      name: "Free PSRAM"
+
+  - platform: internal_temperature
+    name: "Internal Temperature"
+
+  - platform: template
+    id: wifi_disconnects_since_boot_sensor_id
+    name: "WiFi Disconnects (since boot)"
+    icon: mdi:wifi-off
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: 30s
+    lambda: |-
+      return id(wifi_disconnects_since_boot_id);
+
+  - platform: sendspin
+    type: track_duration
+    id: sendspin_track_duration
+    name: "Stream - Track Duration"
+
+  # Time sync filter uncertainty estimate / major sync events that are
+  # audible. Off by default: diagnostic-only, not needed for normal use.
+  # - platform: sendspin
+  #   type: kalman_error
+  #   name: Sendspin Kalman Error
+  #   entity_category: diagnostic
+  #   disabled_by_default: true
+  #
+  # - platform: sendspin
+  #   type: audible_syncs
+  #   name: Sendspin Audible Syncs
+  #   entity_category: diagnostic
+  #   disabled_by_default: true
