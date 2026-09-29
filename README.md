@@ -130,6 +130,7 @@ Everything after the first flash goes over the air.
 | Status LED | The NeoPixel, as a regular light entity - red/blue overlays (see [Status LED](#status-led)) can be overridden manually here |
 | Wake Word Sensitivity | Slightly / Moderately / Very sensitive - adjusts how easily `okay_nabu`/`hey_jarvis` trigger (see [Voice assistant](#voice-assistant)) |
 | User LED | The onboard GPIO21 LED, mirroring the NeoPixel's on/off state (see [Status LED](#status-led)) - diagnostic, since it can't show color |
+| Wake Sound | Toggles `wake_word.mp3` on/off - wake word detection itself is unaffected |
 
 ### Buttons
 
@@ -228,7 +229,8 @@ isn't running.
 | `low_battery.mp3` | `Battery Low` transitions false → true |
 | `charging.mp3` | `Charging` transitions false → true |
 | `full_battery.mp3` | `Charging` transitions true → false - see the caveat below |
-| `wake_word.mp3` | `voice_assistant: on_wake_word_detected` |
+| `wake_word.mp3` | Fresh wake word detection (see [Wake word priority](#wake-word-priority)), if `Wake Sound` is on |
+| `timer_finished.mp3` | Loops (`repeat_one`, 500ms gap) while `timer_ringing` is on - see [Timers](#timers) |
 | `shutdown.mp3` | Defined, not wired to anything yet |
 
 ### Status LED
@@ -239,10 +241,12 @@ The NeoPixel shows two overlapping states, arbitrated by the
 - **Red** while `Battery Low` is on - the script is the single source of
   truth for the idle/red split, called from that binary sensor's
   `on_press`/`on_release`.
-- **Blue** while a wake word is being processed - set directly in
-  `voice_assistant: on_wake_word_detected`, and cleared by the same script
-  running again from `on_idle`/`on_end`, which is why blue always falls back
-  to whatever `update_status_led` currently says rather than a hardcoded off.
+- **Blue** while a wake word is being processed - set directly in the
+  "fresh detection" branch of `micro_wake_word: on_wake_word_detected` (see
+  [Wake word priority](#wake-word-priority)), and cleared by
+  `update_status_led` running again from `voice_assistant: on_idle`/
+  `on_end`, which is why blue always falls back to whatever
+  `update_status_led` currently says rather than a hardcoded off.
 
 The onboard **User LED** (GPIO21, active-low, monochrome - see
 [Hardware](#hardware)) is driven alongside the NeoPixel at every one of the
@@ -279,10 +283,50 @@ ESPHome's own Home Assistant Voice PE reference config, and only cover
 `okay_nabu`/`hey_jarvis` - `alexa` isn't included in that calibration, so it
 stays on its built-in default cutoff regardless of the select's position.
 
+`voice_assistant: micro_wake_word: wake_word_id` does *not* auto-start
+anything on detection - despite its name, it only reports the configured
+models to Home Assistant's wake-word-selection UI (confirmed against
+ESPHome's own source; a config with wake word models but no explicit start
+action never opens a pipeline). The actual trigger is
+`micro_wake_word: on_wake_word_detected`, which explicitly calls
+`voice_assistant.start: wake_word: !lambda return wake_word;` - the
+`wake_word` variable (which model fired) is only available on
+`micro_wake_word`'s own trigger, not `voice_assistant`'s. See
+[Wake word priority](#wake-word-priority) below for the full logic.
+`stop_after_detection: false` keeps the detector running continuously
+(rather than needing an explicit `micro_wake_word.start` to re-arm it after
+every detection), which that logic also depends on.
+
 On detection, `voice_assistant:` opens an Assist pipeline to Home Assistant
 and plays the response back through `external_media_player`'s announcement
 pipeline - so a TTS reply ducks whatever music was playing rather than
 interrupting it (see [Ducking](#ducking) above).
+
+### Wake word priority
+
+A single wake word detection does exactly one of four mutually exclusive
+things (`micro_wake_word: on_wake_word_detected`), checked in this order -
+it never starts a new conversation on the same detection that stopped
+something else:
+
+1. **A timer is ringing** (`timer_ringing` is on) - silence it
+   (`switch.turn_off: timer_ringing`) and stop there. Any wake word works,
+   not just "stop" - see [Timers](#timers) below.
+2. **The voice assistant is already running** - `voice_assistant.stop:`.
+   A second wake word mid-conversation cancels it rather than restarting it.
+3. **Something is announcing** (TTS reply, a battery/charging beep, the
+   timer alarm) - `media_player.stop: announcement: true` interrupts it.
+4. **Otherwise** - the normal fresh-detection flow: blue NeoPixel/User LED,
+   `wake_word_sound` if `Wake Sound` is on, then
+   `voice_assistant.start:`.
+
+`wake_word_sound` and `timer_finished_sound` (see [Timers](#timers)) go
+through the `play_sound` script rather than a direct
+`media_player.play_media`, with `priority: true`: it stops whatever is
+currently announcing first, so an interruption is never silently skipped or
+queued behind what it's interrupting. The other sounds (startup/battery/
+charging) still use `media_player.play_media` directly, since none of them
+need to interrupt anything.
 
 **No hardware echo cancellation.** The INMP441 is a plain digital
 microphone with no AEC of its own, and ESPHome doesn't run a software AEC
@@ -296,6 +340,30 @@ Sendspin/MAX98357A playback rerouted through it to work.
 
 Both `sendspin` and `micro_wake_word`/`voice_assistant` are marked
 **experimental** by ESPHome; breaking changes may land in future releases.
+
+### Timers
+
+Timers set through this device's Assist pipeline ("set a timer for 10
+minutes") are entirely tracked server-side by Home Assistant; the device
+only finds out when one expires, via `voice_assistant: on_timer_finished`,
+which turns on the internal `timer_ringing` switch. `timer_ringing`'s
+`on_turn_on`/`on_turn_off` drive the actual alarm - ducking the music,
+enabling the on-device `stop` wake word model (normally disabled, so it
+can't misfire the rest of the time), and looping `timer_finished_sound`
+(the `ring_timer` script) until it's turned back off, either by:
+
+- **Any wake word firing while it's ringing** - checked first, before
+  anything else, in [Wake word priority](#wake-word-priority) above. Not
+  just "stop": saying any of the wake words silences the alarm, the same
+  way tapping anywhere on a physical alarm clock does, rather than
+  requiring one specific word under pressure.
+- **A 15-minute safety timeout** - `timer_ringing: on_turn_on` ends with a
+  `delay: 15min` before turning itself back off, in case nobody responds.
+
+No LED ring animation - unlike the reference config this was adapted from
+(Home Assistant Voice PE has an RGB LED ring; this board has one NeoPixel),
+a ringing timer doesn't get its own status color here, just whatever
+[Status LED](#status-led) would otherwise show.
 
 ### Network
 
