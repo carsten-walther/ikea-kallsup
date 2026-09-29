@@ -505,12 +505,14 @@ voice_assistant:
         duration: 0.0s
   on_idle:
     - script.execute: update_status_led
+    - light.turn_off: user_led_id
   on_end:
     - mixer_speaker.apply_ducking:
         id: media_mixing_input
         decibel_reduction: 0
         duration: 1.0s
     - script.execute: update_status_led
+    - light.turn_off: user_led_id
   on_timer_finished:
     - switch.turn_on: timer_ringing
 
@@ -873,11 +875,12 @@ output:
 # https://esphome.io/components/light/esp32_rmt_led_strip
 # https://esphome.io/components/light/binary
 #
-# Status indicators: red when the battery is low, blue while a wake word is
-# being processed. See the "update_status_led" script for the idle/red logic
-# and the voice_assistant automations below for the blue overlay. The
-# onboard user LED mirrors the same events but can't show color, so it's
-# simply on whenever the NeoPixel isn't off.
+# Status indicators: the NeoPixel shows red when the battery is low, blue
+# while a wake word is being processed - see the "update_status_led" script
+# for the idle/red logic and micro_wake_word: on_wake_word_detected /
+# voice_assistant: on_idle/on_end for the blue overlay. The onboard user LED
+# only tracks the wake word state (on for blue, off again once
+# voice_assistant returns to idle) - it doesn't reflect battery state.
 #
 light:
   - platform: esp32_rmt_led_strip
@@ -900,10 +903,13 @@ light:
 #
 # https://esphome.io/components/script
 #
-# Re-evaluates what the status LED should show outside of an active wake
-# word (red if the battery is low, off otherwise). Called from
-# battery_low_id's on_press/on_release, and again once voice_assistant falls
-# back to idle so the blue "listening" overlay doesn't get stuck on.
+# Re-evaluates what the NeoPixel should show outside of an active wake word
+# (red if the battery is low, off otherwise). Called from battery_low_id's
+# on_press/on_release, and again once voice_assistant falls back to idle so
+# the blue "listening" overlay doesn't get stuck on. Only touches
+# status_neopixel_id - user_led_id is switched separately (see
+# micro_wake_word: on_wake_word_detected and voice_assistant: on_idle/
+# on_end), since it tracks the wake word state only, not the battery.
 #
 script:
   - id: update_status_led
@@ -917,10 +923,8 @@ script:
                 red: 100%
                 green: 0%
                 blue: 0%
-            - light.turn_on: user_led_id
           else:
             - light.turn_off: status_neopixel_id
-            - light.turn_off: user_led_id
 
   # Starts the timer-finished alarm: repeat_one + a 500ms playlist delay
   # loops timer_finished_sound roughly every 1.1s until timer_ringing turns

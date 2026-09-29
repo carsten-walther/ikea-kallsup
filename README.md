@@ -129,7 +129,7 @@ Everything after the first flash goes over the air.
 |---|---|
 | Status LED | The NeoPixel, as a regular light entity - red/blue overlays (see [Status LED](#status-led)) can be overridden manually here |
 | Wake Word Sensitivity | Slightly / Moderately / Very sensitive - adjusts how easily `okay_nabu`/`hey_jarvis` trigger (see [Voice assistant](#voice-assistant)) |
-| User LED | The onboard GPIO21 LED, mirroring the NeoPixel's on/off state (see [Status LED](#status-led)) - diagnostic, since it can't show color |
+| User LED | The onboard GPIO21 LED, on while a wake word is being processed (see [Status LED](#status-led)) - not tied to battery state |
 | Wake Sound | Toggles `wake_word.mp3` on/off - wake word detection itself is unaffected |
 
 ### Buttons
@@ -248,10 +248,11 @@ The NeoPixel shows two overlapping states, arbitrated by the
   `on_end`, which is why blue always falls back to whatever
   `update_status_led` currently says rather than a hardcoded off.
 
-The onboard **User LED** (GPIO21, active-low, monochrome - see
-[Hardware](#hardware)) is driven alongside the NeoPixel at every one of the
-above points, but can only mirror *whether* something's active, not *what*:
-on for both red and blue, off otherwise.
+The onboard **User LED** (GPIO21, active-low - see [Hardware](#hardware))
+only tracks the blue/wake-word state, not red/battery: on together with the
+NeoPixel's blue in `micro_wake_word: on_wake_word_detected`'s fresh-detection
+branch, off again in `voice_assistant: on_idle`/`on_end` - independently of
+`update_status_led`, which only ever touches the NeoPixel.
 
 ### Battery monitoring
 
