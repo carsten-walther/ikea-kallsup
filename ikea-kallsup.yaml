@@ -491,7 +491,7 @@ voice_assistant:
   # asked Home Assistant to wait for a wake word inside the audio stream,
   # which errored out with "no_wake_word" within milliseconds every time
   # the pipeline was started this way, before any STT could happen.
-  use_wake_word: true
+  use_wake_word: false
   noise_suppression_level: 0
   auto_gain: 0 dbfs
   volume_multiplier: 1
@@ -515,6 +515,18 @@ voice_assistant:
     - light.turn_off: user_led_id
   on_timer_finished:
     - switch.turn_on: timer_ringing
+  # micro_wake_word never starts itself - its inference task stays in the
+  # STOPPED state until something explicitly calls micro_wake_word.start
+  # (confirmed against the component's own source: setup() never does this,
+  # and neither does voice_assistant's). Without this, on_wake_word_detected
+  # above simply never fires, no matter what else is tuned - matches
+  # ESPHome's own Home Assistant Voice PE reference config, which starts it
+  # here for the same reason: only useful once Home Assistant is actually
+  # connected to receive the resulting conversation.
+  on_client_connected:
+    - micro_wake_word.start:
+  on_client_disconnected:
+    - voice_assistant.stop:
 
 #
 # https://esphome.io/components/http_request
