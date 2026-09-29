@@ -154,3 +154,11 @@ def ping(freq, dur, decay=6.5):
 wake = np.zeros(int(SR * 0.9))
 place(wake, ping(note_freq("A6"), 0.9), 0.0)
 finish(wake, "wake_word", 0.9)
+
+# Timer finished: quick double-beep alarm ping. Loops via media_player.repeat_one
+# with a 500ms playlist delay while timer_ringing is on, giving a classic
+# alarm-clock beep-beep cadence rather than a one-shot chime.
+timer_finished = np.zeros(int(SR * 0.6))
+place(timer_finished, ping(note_freq("A5"), 0.35), 0.00)
+place(timer_finished, ping(note_freq("A5"), 0.35), 0.28)
+finish(timer_finished, "timer_finished", 0.6)

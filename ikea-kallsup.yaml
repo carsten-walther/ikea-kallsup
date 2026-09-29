@@ -297,9 +297,7 @@ microphone:
     adc_type: external
     channel: left
     pdm: false
-    #sample_rate: 16000
     bits_per_sample: 32bit
-    use_apll: true
 
 #
 # https://esphome.io/components/micro_wake_word
@@ -310,7 +308,11 @@ micro_wake_word:
     microphone: inmp441_mic
     channels: 0
     gain_factor: 4
-  stop_after_detection: true
+  # False: on_wake_word_detected below needs to keep firing while
+  # voice_assistant is running or media_player is announcing (to let a
+  # second wake word interrupt either), and nothing here ever calls
+  # micro_wake_word.start to re-arm a one-shot detector.
+  stop_after_detection: false
   task_stack_in_psram: true
   models:
     - model: alexa
@@ -323,6 +325,58 @@ micro_wake_word:
       id: stop
       internal: true
   vad:
+  # A single wake word detection does one of four mutually exclusive things,
+  # in priority order - it never starts a new conversation on the same
+  # detection that stopped something else:
+  on_wake_word_detected:
+    - if:
+        condition:
+          switch.is_on: timer_ringing
+        then:
+          # A timer is ringing: stop it, don't start the voice assistant -
+          # any wake word silences it, the same way tapping anywhere on a
+          # physical alarm clock does, rather than requiring one specific
+          # word under pressure.
+          - switch.turn_off: timer_ringing
+        else:
+          - if:
+              condition:
+                voice_assistant.is_running:
+              then:
+                # Already in a conversation: treat a second wake word as
+                # "cancel", not as restarting it.
+                - voice_assistant.stop:
+              else:
+                - if:
+                    condition:
+                      media_player.is_announcing: external_media_player
+                    then:
+                      # Interrupt whatever's currently announcing (TTS
+                      # reply, battery/charging beep, ...).
+                      - media_player.stop:
+                          id: external_media_player
+                          announcement: true
+                    else:
+                      # Nothing else going on: this is a fresh wake word -
+                      # show it, chime if enabled, then actually start
+                      # listening.
+                      - light.turn_on:
+                          id: status_neopixel_id
+                          red: 0%
+                          green: 0%
+                          blue: 100%
+                      - light.turn_on: user_led_id
+                      - if:
+                          condition:
+                            switch.is_on: wake_sound
+                          then:
+                            - script.execute:
+                                id: play_sound
+                                priority: true
+                                sound_file: wake_word_sound
+                            - delay: 300ms
+                      - voice_assistant.start:
+                          wake_word: !lambda return wake_word;
 
 #
 # https://esphome.io/components/select
@@ -364,7 +418,7 @@ select:
 # https://esphome.io/components/switch
 #
 switch:
-  # Gates wake_word_sound in voice_assistant: on_wake_word_detected below -
+  # Gates wake_word_sound in micro_wake_word: on_wake_word_detected above -
   # lets the confirmation beep be turned off without touching the wake word
   # detection itself.
   - platform: template
@@ -375,6 +429,50 @@ switch:
     optimistic: true
     restore_mode: RESTORE_DEFAULT_ON
 
+  # Internal switch tracking whether a Home Assistant timer set through this
+  # device is ringing. Turned on by voice_assistant: on_timer_finished;
+  # turned off either by its own 15-minute safety timeout or by a wake word
+  # firing while it's on (see micro_wake_word: on_wake_word_detected) - any
+  # wake word works, not just "stop", matching how a physical alarm clock
+  # silences on the first touch rather than requiring a specific button.
+  - platform: template
+    id: timer_ringing
+    internal: true
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 20
+          duration: 0.0s
+      # Lets the on-device "stop" model additionally silence the timer,
+      # without it being active (and liable to misfire) the rest of the time.
+      - micro_wake_word.enable_model: stop
+      - script.execute: ring_timer
+      - delay: 15min
+      - switch.turn_off: timer_ringing
+    on_turn_off:
+      - micro_wake_word.disable_model: stop
+      - media_player.repeat_off:
+          id: external_media_player
+          announcement: true
+      - speaker_source.set_playlist_delay:
+          id: external_media_player
+          pipeline: announcement
+          delay: 0ms
+      - if:
+          condition:
+            media_player.is_announcing: external_media_player
+          then:
+            - media_player.stop:
+                id: external_media_player
+                announcement: true
+      - mixer_speaker.apply_ducking:
+          id: media_mixing_input
+          decibel_reduction: 0
+          duration: 1.0s
+      - script.execute: update_status_led
+
 #
 # https://esphome.io/components/voice_assistant
 #
@@ -383,7 +481,9 @@ switch:
 #
 voice_assistant:
   id: voice_assistant_id
-  microphone: inmp441_mic
+  microphone:
+    microphone: inmp441_mic
+    channels: 0
   micro_wake_word: wake_word_id
   media_player: external_media_player
   # False, not True: wake word detection already happened on-device via
@@ -391,25 +491,10 @@ voice_assistant:
   # asked Home Assistant to wait for a wake word inside the audio stream,
   # which errored out with "no_wake_word" within milliseconds every time
   # the pipeline was started this way, before any STT could happen.
-  use_wake_word: false
-  noise_suppression_level: 2
-  auto_gain: 31dBFS
-  volume_multiplier: 3.0
-  on_wake_word_detected:
-    - light.turn_on:
-        id: status_neopixel_id
-        red: 0%
-        green: 0%
-        blue: 100%
-    - light.turn_on: user_led_id
-    - if:
-        condition:
-          switch.is_on: wake_sound
-        then:
-          - media_player.play_media:
-              id: external_media_player
-              media_url: audio-file://wake_word_sound
-              announcement: true
+  use_wake_word: true
+  noise_suppression_level: 0
+  auto_gain: 0 dbfs
+  volume_multiplier: 1
   # Ducks the music the instant listening starts, rather than waiting for
   # media_player's own on_announcement (which only fires once the TTS
   # response actually starts streaming back).
@@ -426,6 +511,8 @@ voice_assistant:
         decibel_reduction: 0
         duration: 1.0s
     - script.execute: update_status_led
+  on_timer_finished:
+    - switch.turn_on: timer_ringing
 
 #
 # https://esphome.io/components/http_request
@@ -445,6 +532,13 @@ sendspin:
 # https://esphome.io/components/media_source
 #
 media_source:
+  # Announcement pipeline: sound effects and Home Assistant's TTS responses.
+  # A media_source can only feed one pipeline, so these are separate
+  # instances from sendspin_source/http_source above even though
+  # http_announcement_source and http_source are the same platform.
+  - platform: audio_file
+    id: audio_file_announcement_source
+
   # Media pipeline: music, not announcements.
   - platform: sendspin
     id: sendspin_source
@@ -453,13 +547,6 @@ media_source:
   - platform: audio_http
     id: http_source
     buffer_size: 500000
-
-  # Announcement pipeline: sound effects and Home Assistant's TTS responses.
-  # A media_source can only feed one pipeline, so these are separate
-  # instances from sendspin_source/http_source above even though
-  # http_announcement_source and http_source are the same platform.
-  - platform: audio_file
-    id: audio_file_announcement_source
 
   - platform: audio_http
     id: http_announcement_source
@@ -486,6 +573,9 @@ audio_file:
   
   - id: wake_word_sound
     file: sounds/wake_word.mp3
+
+  - id: timer_finished_sound
+    file: sounds/timer_finished.mp3
 
 #
 # https://esphome.io/components/media_player
@@ -516,6 +606,9 @@ media_player:
       sources:
         - sendspin_source
         - http_source
+    volume_increment: 0.05
+    volume_min: 0.4
+    volume_max: 0.85
     # Ducks the music 20dB whenever any announcement (sound effect or TTS)
     # plays, and restores it once nothing's announcing and the voice
     # assistant isn't running.
@@ -710,6 +803,7 @@ binary_sensor:
       number: ${PIN_CHARGE_STATUS}
       mode: INPUT_PULLUP
       inverted: true
+      ignore_strapping_warning: true
     on_press:
       - media_player.play_media:
           id: external_media_player
@@ -827,6 +921,50 @@ script:
           else:
             - light.turn_off: status_neopixel_id
             - light.turn_off: user_led_id
+
+  # Starts the timer-finished alarm: repeat_one + a 500ms playlist delay
+  # loops timer_finished_sound roughly every 1.1s until timer_ringing turns
+  # off. Goes through play_sound with priority: true so it always cuts off
+  # whatever announcement is already playing (e.g. a TTS reply).
+  - id: ring_timer
+    then:
+      - media_player.repeat_one:
+          id: external_media_player
+          announcement: true
+      - speaker_source.set_playlist_delay:
+          id: external_media_player
+          pipeline: announcement
+          delay: 500ms
+      - script.execute:
+          id: play_sound
+          priority: true
+          sound_file: timer_finished_sound
+
+  # Plays sound_file on external_media_player's announcement pipeline. With
+  # priority: true (an interruption - wake word chime, timer alarm), it
+  # first stops whatever's currently announcing so it's never skipped or
+  # queued behind it. Without priority, it's skipped outright if something
+  # is already announcing, rather than talking over or queuing behind it.
+  - id: play_sound
+    parameters:
+      priority: bool
+      sound_file: string
+    then:
+      - if:
+          condition:
+            lambda: return priority;
+          then:
+            - media_player.stop:
+                id: external_media_player
+                announcement: true
+      - lambda: |-
+          if ((id(external_media_player).state != media_player::MediaPlayerState::MEDIA_PLAYER_STATE_ANNOUNCING) || priority) {
+            id(external_media_player)
+              ->make_call()
+              .set_media_url("audio-file://" + sound_file)
+              .set_announcement(true)
+              .perform();
+          }
 
 #
 # https://esphome.io/components/sensor
