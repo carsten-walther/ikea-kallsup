@@ -10,8 +10,6 @@ Assist voice satellite with local wake word detection. A status NeoPixel and
 battery monitoring round it out for running off a LiPo. Reports to Home
 Assistant over the encrypted native API.
 
-Source: [Converting new (5€) Ikea Kallsup speaker into a ESPHome media player](https://community.home-assistant.io/t/converting-new-5-ikea-kallsup-speaker-into-a-esphome-media-player/1000870)
-
 ---
 
 ## Hardware
@@ -274,34 +272,56 @@ reports whether charging is active, not whether a charger is present at all.
 
 ### Voice assistant
 
-`microphone:` (the INMP441) feeds `micro_wake_word:`, running three wake
-word models locally on-device - `alexa`, `okay_nabu`, `hey_jarvis`
-(`task_stack_in_psram` keeps their tensor arena out of internal RAM). The
-`Wake Word Sensitivity` select adjusts each model's `probability_cutoff`
-(how strict a match has to be) between three preset levels; the underlying
-values and False-Accepts-Per-Hour figures in the code comments come from
-ESPHome's own Home Assistant Voice PE reference config, and only cover
-`okay_nabu`/`hey_jarvis` - `alexa` isn't included in that calibration, so it
-stays on its built-in default cutoff regardless of the select's position.
+`microphone:` (the INMP441) feeds `micro_wake_word:`, running six wake word
+models locally on-device - `alexa`, `okay_nabu`, `hey_jarvis`, plus three
+from ESPHome's experimental set: `okay_computer`, `hey_home_assistant`,
+`hey_peppa_pig` (`task_stack_in_psram` keeps their tensor arena out of
+internal RAM). The `Wake Word Sensitivity` select adjusts each model's
+`probability_cutoff` (how strict a match has to be) between three preset
+levels; the underlying values and False-Accepts-Per-Hour figures in the
+code comments come from ESPHome's own Home Assistant Voice PE reference
+config, and only cover `okay_nabu`/`hey_jarvis` - the other four models
+aren't included in that calibration, so they stay on their built-in default
+cutoff regardless of the select's position.
 
-`voice_assistant: micro_wake_word: wake_word_id` does *not* auto-start
-anything on detection - despite its name, it only reports the configured
-models to Home Assistant's wake-word-selection UI (confirmed against
-ESPHome's own source; a config with wake word models but no explicit start
-action never opens a pipeline). The actual trigger is
-`micro_wake_word: on_wake_word_detected`, which explicitly calls
-`voice_assistant.start: wake_word: !lambda return wake_word;` - the
-`wake_word` variable (which model fired) is only available on
-`micro_wake_word`'s own trigger, not `voice_assistant`'s. See
+**`micro_wake_word` never starts its inference task on its own** -
+confirmed against the component's own source: `pending_start_` defaults to
+`false`, and neither `MicroWakeWord::setup()` nor `VoiceAssistant::setup()`
+ever calls `start()`. Without an explicit `micro_wake_word.start:`
+somewhere, `on_wake_word_detected` simply never fires, no matter how gain/
+cutoff/wiring/anything else is tuned - this was the root cause behind wake
+word detection never working on this project for a long time.
+`voice_assistant: on_client_connected` (fired once Home Assistant's Assist
+integration actually subscribes to this device - not just any generic API
+client, and not the same as the device merely being reachable) calls
+`micro_wake_word.start:`; `on_client_disconnected` calls
+`voice_assistant.stop:`, matching ESPHome's own Home Assistant Voice PE
+reference config. `stop_after_detection: false` then keeps it running
+continuously afterwards, rather than needing a `micro_wake_word.start` to
+re-arm it after every single detection.
+
+`voice_assistant: use_wake_word` must be `false`, not `true`: wake word
+detection already happens on-device via `micro_wake_word`, so `true` makes
+voice_assistant *additionally* ask Home Assistant to wait for a wake word
+inside the audio stream - which fails with `no_wake_word` within
+milliseconds every time, bouncing straight back to idle before any STT can
+happen. (Symptom if this regresses: the confirmation chime/LED fire
+correctly, but no command can ever be given afterwards.)
+
+`voice_assistant: micro_wake_word: wake_word_id` itself does *not*
+auto-start anything on detection - despite its name, it only reports the
+configured models to Home Assistant's wake-word-selection UI. The actual
+detection trigger is `micro_wake_word: on_wake_word_detected`, which
+explicitly calls `voice_assistant.start: wake_word: !lambda return
+wake_word;` - the `wake_word` variable (which model fired) is only
+available on `micro_wake_word`'s own trigger, not `voice_assistant`'s. See
 [Wake word priority](#wake-word-priority) below for the full logic.
-`stop_after_detection: false` keeps the detector running continuously
-(rather than needing an explicit `micro_wake_word.start` to re-arm it after
-every detection), which that logic also depends on.
 
 On detection, `voice_assistant:` opens an Assist pipeline to Home Assistant
 and plays the response back through `external_media_player`'s announcement
 pipeline - so a TTS reply ducks whatever music was playing rather than
-interrupting it (see [Ducking](#ducking) above).
+interrupting it (see [Ducking](#ducking) above). Verified end-to-end via
+live device logs: wake word → STT → intent → TTS response → back to idle.
 
 ### Wake word priority
 
