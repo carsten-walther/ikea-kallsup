@@ -844,8 +844,8 @@ binary_sensor:
     id: button_play_id
     pin:
       number: ${PIN_BUTTON_PLAY}
-      mode: INPUT_PULLDOWN
-      inverted: false # Assume button connects to GND
+      mode: INPUT_PULLUP
+      inverted: true # Button connects to GND - confirmed on real hardware
     name: "Button Play"
     on_press:
       - media_player.toggle: external_media_player
@@ -854,8 +854,8 @@ binary_sensor:
     id: button_bt_id
     pin:
       number: ${PIN_BUTTON_BT}
-      mode: INPUT_PULLDOWN
-      inverted: false # Assume button connects to GND
+      mode: INPUT_PULLUP
+      inverted: true # Button connects to GND - confirmed on real hardware
     name: "Button BT"
     on_press:
       - media_player.mute: external_media_player
