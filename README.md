@@ -5,10 +5,11 @@
 An [ESPHome](https://esphome.io) replacement for the stock control board inside
 an IKEA KALLSUP speaker. Plays synchronized multi-room audio via the
 [Sendspin](https://esphome.io/components/sendspin/) protocol (Music
-Assistant), streams arbitrary HTTP audio, and doubles as a Home Assistant
-Assist voice satellite with local wake word detection. A status NeoPixel and
-battery monitoring round it out for running off a LiPo. Reports to Home
-Assistant over the encrypted native API.
+Assistant), streams arbitrary HTTP audio, answers as a classic AirPlay (RAOP)
+receiver, and doubles as a Home Assistant Assist voice satellite with local
+wake word detection. A status NeoPixel and battery monitoring round it out
+for running off a LiPo. Reports to Home Assistant over the encrypted native
+API.
 
 ---
 
@@ -184,8 +185,9 @@ an identical value every `update_interval` for the lifetime of the device.
 and distributes group state. `external_media_player` (the `speaker_source`
 platform) has two independent pipelines rather than one shared one:
 
-- **`media_pipeline`** - music: `sendspin` (synchronized multi-room audio)
-  and `audio_http` (plain HTTP/HTTPS streams).
+- **`media_pipeline`** - music: `sendspin` (synchronized multi-room audio),
+  `audio_http` (plain HTTP/HTTPS streams), and `airplay` (classic AirPlay/
+  RAOP - see [AirPlay](#airplay) below).
 - **`announcement_pipeline`** - everything in [Sounds](#sounds) below, plus
   Home Assistant's TTS responses: `audio_file` (the local sound effects) and
   a second, separate `audio_http` source for the TTS URLs.
@@ -204,6 +206,23 @@ the I2S bus - see [Ducking](#ducking) below.
 `sendspin_group_media_player` only controls the Sendspin group (volume,
 transport) and produces no audio of its own; the actual playback and group
 control both live on `external_media_player`.
+
+### AirPlay
+
+`airplay_source` pulls in
+[inventor7777/ESPHome-AirPlay](https://github.com/inventor7777/ESPHome-AirPlay)
+via `external_components:` and advertises this device as a classic AirPlay
+(AirPlay 1 / RAOP) receiver under the name `${friendly_name}`, so an
+iPhone/Mac can select it directly from Control Center. It feeds the same
+`media_pipeline` as `sendspin_source`/`http_source` - the existing
+`resampler`/`mixer` pair already normalizes whatever each source provides to
+48kHz/32bit, so AirPlay's fixed 44.1kHz/16-bit stereo PCM needs no special
+handling.
+
+This is AirPlay 1 only - no AirPlay 2, so no lossless beyond ALAC and no
+multiroom sync through AirPlay itself. Grouping this device with others
+still goes through Sendspin, not AirPlay. The AirPlay component is
+GPL-3.0, same as this repo.
 
 ### Ducking
 
