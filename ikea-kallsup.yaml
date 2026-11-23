@@ -54,6 +54,13 @@ substitutions:
   PIN_USER_LED: GPIO21
 
 #
+# https://github.com/inventor7777/ESPHome-AirPlay
+#
+external_components:
+  - source: github://inventor7777/ESPHome-AirPlay
+    components: [airplay]
+
+#
 # https://esphome.io/components/esphome
 #
 esphome:
@@ -564,6 +571,14 @@ media_source:
     id: sendspin_source
     buffer_size: 500000
 
+  # AirPlay 1 (RAOP) receiver - shows up as a classic AirPlay speaker to
+  # iPhones/Macs. No AirPlay 2, so no guaranteed multiroom sync through
+  # AirPlay itself - Sendspin above remains the way to group this device
+  # with other ESPHome speakers.
+  - platform: airplay
+    id: airplay_source
+    name: "${friendly_name}"
+
   - platform: audio_http
     id: http_source
     buffer_size: 500000
@@ -626,6 +641,7 @@ media_player:
       sources:
         - sendspin_source
         - http_source
+        - airplay_source
     volume_increment: 0.05
     volume_min: 0.4
     volume_max: 0.85
