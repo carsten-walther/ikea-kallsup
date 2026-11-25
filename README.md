@@ -138,6 +138,7 @@ Everything after the first flash goes over the air.
 | Restart | |
 | Restart (Safe Mode) | Reboots into WiFi + OTA only - the way back in after a bad flash |
 | Factory Reset | Wipes the WiFi credentials and every stored preference |
+| Identify | Strobes the NeoPixel white for 5s - for telling multiple identical Kallsups apart, battery state included |
 | Button Play *(physical, GPIO04)* | Single click toggles play/pause; double click skips to the next track - Sendspin's queue directly, or AirPlay's sender via DACP if supported and enabled (see [AirPlay](#airplay)) |
 | Button BT *(physical, GPIO43)* | Manually triggers the voice assistant, without needing a wake word (see [Wake word priority](#wake-word-priority)) |
 

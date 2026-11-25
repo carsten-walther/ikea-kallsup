@@ -894,6 +894,18 @@ button:
     name: Restart (Safe Mode)
     icon: mdi:reload
 
+  # Cycles the NeoPixel through a rainbow - for telling multiple identical
+  # Kallsups apart, e.g. to find out which entity belongs to which physical
+  # unit. No animation if the battery is already low (see the identify
+  # script below) - the LED is already showing something meaningful then.
+  - platform: template
+    id: identify_id
+    name: Identify
+    icon: mdi:magnify
+    entity_category: config
+    on_press:
+      - script.execute: identify
+
 #
 # https://esphome.io/components/output
 #
@@ -925,6 +937,20 @@ light:
     name: "Status LED"
     entity_category: config
     restore_mode: ALWAYS_OFF
+    # Used by the identify script below. White via red/green/blue all at
+    # 100% - this is a plain RGB strip (rgb_order, no W channel), not RGBW,
+    # so there's no separate white: field to set.
+    effects:
+      - strobe:
+          name: Identify
+          colors:
+            - state: ON
+              red: 100%
+              green: 100%
+              blue: 100%
+              duration: 200ms
+            - state: OFF
+              duration: 200ms
 
   - platform: binary
     id: user_led_id
@@ -958,6 +984,25 @@ script:
                 blue: 0%
           else:
             - light.turn_off: status_neopixel_id
+
+  # Runs the Identify strobe effect (see light: status_neopixel_id above)
+  # for a few seconds, for telling multiple identical Kallsups apart -
+  # triggered by the "Identify" button. Runs even while the battery is low
+  # (overriding the solid red from update_status_led for those 5s) - the
+  # whole point is finding the physical unit, battery state included.
+  # effect: "None" before update_status_led - otherwise the effect, still
+  # active, would keep overriding update_status_led's restored color/off on
+  # every render pass.
+  - id: identify
+    then:
+      - light.turn_on:
+          id: status_neopixel_id
+          effect: Identify
+      - delay: 5s
+      - light.turn_on:
+          id: status_neopixel_id
+          effect: "None"
+      - script.execute: update_status_led
 
   # Starts the timer-finished alarm: repeat_one + a 500ms playlist delay
   # loops timer_finished_sound roughly every 1.1s until timer_ringing turns
