@@ -138,12 +138,12 @@ Everything after the first flash goes over the air.
 | Restart | |
 | Restart (Safe Mode) | Reboots into WiFi + OTA only - the way back in after a bad flash |
 | Factory Reset | Wipes the WiFi credentials and every stored preference |
-| Button Play *(physical, GPIO04)* | Toggles play/pause on the media player |
-| Button BT *(physical, GPIO43)* | Mutes the media player - still looking for a better use |
+| Button Play *(physical, GPIO04)* | Single click toggles play/pause; double click skips to the next track - Sendspin's queue directly, or AirPlay's sender via DACP if supported and enabled (see [AirPlay](#airplay)) |
+| Button BT *(physical, GPIO43)* | Manually triggers the voice assistant, without needing a wake word (see [Wake word priority](#wake-word-priority)) |
 
-`Button Play`/`Button BT` are wired as `binary_sensor: platform: gpio` with
-an `on_press` automation, not as `button:` entities - they represent the
-physical buttons on the speaker, not something to click from the Home
+`Button Play`/`Button BT` are wired as `binary_sensor: platform: gpio`
+(`on_multi_click`/`on_press`), not as `button:` entities - they represent
+the physical buttons on the speaker, not something to click from the Home
 Assistant UI.
 
 ### Sensors
@@ -223,6 +223,15 @@ This is AirPlay 1 only - no AirPlay 2, so no lossless beyond ALAC and no
 multiroom sync through AirPlay itself. Grouping this device with others
 still goes through Sendspin, not AirPlay. The AirPlay component is
 GPL-3.0, same as this repo.
+
+`remote_control: true` enables DACP (Digital Audio Control Protocol), so
+Button Play's double click (see [Buttons](#buttons)) can skip tracks on the
+sender, not just locally - `speaker_source` forwards `media_player.next`/
+`.previous` to whichever media source is currently playing, and
+`airplay_source` relays that over DACP the same way `sendspin_source`
+relays it to the Sendspin group. Not guaranteed: it depends on the sender
+advertising a matching `_dacp._tcp` service, which discovery doesn't
+verify in advance.
 
 ### Ducking
 
@@ -345,9 +354,15 @@ live device logs: wake word → STT → intent → TTS response → back to idle
 ### Wake word priority
 
 A single wake word detection does exactly one of four mutually exclusive
-things (`micro_wake_word: on_wake_word_detected`), checked in this order -
-it never starts a new conversation on the same detection that stopped
-something else:
+things, checked in this order - it never starts a new conversation on the
+same detection that stopped something else. This logic lives in the
+`trigger_voice_assistant` script, shared by `micro_wake_word:
+on_wake_word_detected` and `Button BT`'s `on_press` (see
+[Buttons](#buttons)) - a manual button press goes through the exact same
+priority as an on-device detection, just with no wake word model name to
+report, which sidesteps the mic's lack of echo cancellation (see the AEC
+caveat at the end of this section) since it doesn't depend on a model
+picking the word out of loud music at all:
 
 1. **A timer is ringing** (`timer_ringing` is on) - silence it
    (`switch.turn_off: timer_ringing`) and stop there. Any wake word works,
